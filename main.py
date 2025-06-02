@@ -7,19 +7,20 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import bcrypt
+from passlib.context import CryptContext
 import jwt
 from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timedelta, timezone
-from passlib.context import CryptContext
 
 # Создание объекта FastAPI
 app = FastAPI()
 
-# Настройка базы данных MySQL (не забудьте заменить на ваши данные)
+# Настройка базы данных MySQL (замените на свои данные)
 SQLALCHEMY_DATABASE_URL = "mysql+pymysql://isp_p_Pasquida:12345@77.91.86.135/isp_p_Pasquida"
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 # Настройка bcrypt для хеширования паролей
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -27,8 +28,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_MINUTES = 10080
 
-# Определение модели SQLAlchemy для пользователя
+# Модель SQLAlchemy для пользователя
 class User(Base):
     __tablename__ = "users"
 
@@ -39,20 +41,19 @@ class User(Base):
     hashed_password = Column(String(100))
     disabled = Column(Boolean, default=False)
 
-# Создание таблиц в базе данных
+# Создание таблиц
 Base.metadata.create_all(bind=engine)
 
-# OAuth2 схема для авторизации
+# OAuth2 схема
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Определение Pydantic модели для создания пользователя
+# Pydantic модели
 class UserCreate(BaseModel):
     username: str
     email: str
     full_name: str | None = None
     password: str
 
-# Определение Pydantic модели для обновления пользователя
 class UserUpdate(BaseModel):
     username: str | None = None
     email: str | None = None
@@ -60,7 +61,6 @@ class UserUpdate(BaseModel):
     password: str | None = None
     disabled: bool | None = None
 
-# Определение Pydantic модели для ответа
 class UserResponse(BaseModel):
     id: int
     username: str
@@ -71,25 +71,17 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# Определение Pydantic модели для пользователя в базе данных
 class UserInDB(UserResponse):
     hashed_password: str
 
-# Определение Pydantic модели для токена
 class Token(BaseModel):
     access_token: str
     token_type: str
 
-# Определение Pydantic модели для данных токена
 class TokenData(BaseModel):
     username: str | None = None
 
-def fake_decode_token(token):
-    return User(
-        username=token + "fakedecoded", email="john@example.com", full_name="John Doe"
-    )
-
-# Зависимость для получения сессии базы данных
+# Зависимость для получения сессии БД
 def get_db():
     db = SessionLocal()
     try:
@@ -97,34 +89,43 @@ def get_db():
     finally:
         db.close()
 
-def read_user(username: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-# Функция для хеширования пароля
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-# Функция для проверки пароля
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-# Функция для получения пользователя по имени пользователя
+# Получение пользователя по имени
 def get_user_by_username(db: Session, username: str):
     return db.query(User).filter(User.username == username).first()
 
-# Функция для получения пользователя по ID
-def get_user(username: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+# Хеширование пароля
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+# Проверка пароля
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+# Аутентификация пользователя
+def authenticate_user(db: Session, username: str, password: str):
+    user = get_user_by_username(db, username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
     return user
 
+# Создание токена доступа
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-# Функция для получения текущего пользователя по токену
-async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], db: Session = Depends(get_db)):
+# Получение текущего пользователя из токена
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db)
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -143,33 +144,15 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], db: Se
         raise credentials_exception
     return user
 
-# Функция для получения текущего активного пользователя
-async def get_current_active_user(current_user: Annotated[User, Depends(get_current_user)]):
+# Получение активного пользователя
+async def get_current_active_user(
+    current_user: Annotated[User, Depends(get_current_user)]
+):
     if current_user.disabled:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
-# Функция для аутентификации пользователя
-def authenticate_user(db: Session, username: str, password: str):
-    user = get_user_by_username(db, username=username)
-    if not user:
-        return False
-    if not verify_password(password, user.hashed_password):
-        return False
-    return user
-
-# Функция для создания токена доступа
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-# Маршрут для регистрации нового пользователя
+# Маршрут регистрации
 @app.post("/register/", response_model=UserResponse)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
     hashed_password = hash_password(user.password)
@@ -190,7 +173,10 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
 
 # Маршрут для получения токена
 @app.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
+    db: Session = Depends(get_db)
+):
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
@@ -204,12 +190,12 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Маршрут для получения текущего пользователя
+# Получение текущего пользователя
 @app.get("/users/me", response_model=UserResponse)
 async def read_users_me(current_user: Annotated[User, Depends(get_current_active_user)]):
     return current_user
 
-# Маршрут для получения всех пользователей
+# Получение всех пользователей
 @app.get("/users/", response_model=list[UserResponse])
 def get_users(db: Session = Depends(get_db)):
     users = db.query(User).all()
@@ -217,7 +203,7 @@ def get_users(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Users not found")
     return users
 
-# Маршрут для получения пользователя по ID
+# Получение пользователя по ID
 @app.get("/users/{user_id}", response_model=UserResponse)
 def get_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
@@ -225,7 +211,7 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-# Маршрут для обновления пользователя
+# Обновление пользователя
 @app.put("/users/{user_id}", response_model=UserResponse)
 def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
@@ -249,7 +235,7 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         db.rollback()
         raise HTTPException(status_code=400, detail="Username or Email already registered")
 
-# Маршрут для удаления пользователя
+# Удаление пользователя
 @app.delete("/users/{user_id}", response_model=UserResponse)
 def delete_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()

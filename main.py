@@ -15,15 +15,15 @@ from passlib.context import CryptContext
 # Создание объекта FastAPI
 app = FastAPI()
 
+# Настройка базы данных MySQL (не забудьте заменить на ваши данные)
 SQLALCHEMY_DATABASE_URL = "mysql+pymysql://isp_p_Pasquida:12345@77.91.86.135/isp_p_Pasquida"
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
 # Настройка bcrypt для хеширования паролей
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Секретный ключ для JWT (не забудьте заменить на что-то случайное и безопасное)
+# Секретный ключ для JWT 
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -41,6 +41,9 @@ class User(Base):
 
 # Создание таблиц в базе данных
 Base.metadata.create_all(bind=engine)
+
+# OAuth2 схема для авторизации
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Определение Pydantic модели для создания пользователя
 class UserCreate(BaseModel):
@@ -81,6 +84,11 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: str | None = None
 
+def fake_decode_token(token):
+    return User(
+        username=token + "fakedecoded", email="john@example.com", full_name="John Doe"
+    )
+
 # Зависимость для получения сессии базы данных
 def get_db():
     db = SessionLocal()
@@ -88,6 +96,12 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def read_user(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 # Функция для хеширования пароля
 def hash_password(password: str) -> str:
@@ -108,8 +122,6 @@ def get_user(username: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-# OAuth2 схема для авторизации
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Функция для получения текущего пользователя по токену
 async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], db: Session = Depends(get_db)):
